@@ -9,6 +9,10 @@ user_data/*
 !user_data/notebooks
 !user_data/models
 !user_data/freqaimodels
+
+# Includi la strategia custom AI (ma NON config/dati/log)
+!user_data/strategies/
+!user_data/strategies/**
 user_data/freqaimodels/*
 user_data/models/*
 user_data/notebooks/*

@@ -1,3 +1,237 @@
+# 🤖 AIsentimentBot — Freqtrade + AI Sentiment Strategy
+
+> Fork di [freqtrade/freqtrade](https://github.com/freqtrade/freqtrade) con una strategia custom AI-native che combina **LLM Sentiment Analysis** e **Analisi Tecnica** per fare trading autonomo su Kraken.
+
+---
+
+## 📋 Descrizione
+
+Il bot opera in ciclo continuo 24/7 su **Kraken** (paper trading e live), analizzando in tempo reale:
+
+1. **News crypto** via CryptoCompare API — aggiornate ogni 10 minuti
+2. **Sentiment LLM** via OpenRouter (Llama 3 8B, gratuito) con fallback su Google Gemini
+3. **Indicatori tecnici**: RSI ≥ 55 (obbligatorio), EMA 10/30, MACD, Bollinger Bands
+
+Il risultato è una decisione autonoma di `BUY / SELL / HOLD` con notifiche Telegram.
+
+---
+
+## 🏗️ Architettura
+
+```
+docker-compose.yml
+└── freqtrade_ai (container)
+    ├── user_data/config.json          ← Configurazione exchange + dashboard
+    └── user_data/strategies/
+        ├── AIsentimentStrategy.py     ← Strategia principale
+        └── helpers/
+            ├── news_client.py         ← Fetch news CryptoCompare (cache 10min)
+            └── llm_client.py          ← OpenRouter + Gemini fallback (cache 10min)
+```
+
+### Stack
+
+| Componente | Tecnologia |
+|---|---|
+| Framework | [Freqtrade](https://www.freqtrade.io) (Python) |
+| Exchange | Kraken via CCXT |
+| News | CryptoCompare API v2 |
+| LLM Primario | OpenRouter — `meta-llama/llama-3-8b-instruct:free` |
+| LLM Fallback | Google Gemini 1.5 Flash |
+| Dashboard | FreqUI (React, porta 8080) |
+| Database | SQLite (trade history persistente) |
+| Notifiche | Telegram Bot API |
+| Deployment | Docker / AWS EC2 |
+
+---
+
+## ⚙️ Configurazione
+
+### 1. Crea il file `.env`
+
+Copia il template e inserisci le tue chiavi API:
+
+```env
+# Kraken (solo per live trading, non serve in dry_run)
+KRAKEN_API_KEY=la_tua_chiave
+KRAKEN_API_SECRET=il_tuo_secret
+
+# Telegram — crea il bot con @BotFather
+TELEGRAM_BOT_TOKEN=il_tuo_token
+TELEGRAM_CHAT_ID=il_tuo_chat_id
+
+# News
+CRYPTOCOMPARE_API_KEY=la_tua_chiave   # https://min-api.cryptocompare.com/
+
+# LLM (almeno uno obbligatorio)
+OPENROUTER_API_KEY=la_tua_chiave      # https://openrouter.ai/ (gratis)
+GEMINI_API_KEY=la_tua_chiave          # https://aistudio.google.com/ (fallback)
+
+# Dashboard FreqUI
+FREQTRADE_UI_USERNAME=admin
+FREQTRADE_UI_PASSWORD=freqtrade2024!
+```
+
+### 2. Aggiorna `user_data/config.json`
+
+Nella sezione `"telegram"` inserisci token e chat_id:
+
+```json
+"telegram": {
+    "enabled": true,
+    "token": "IL_TUO_TOKEN",
+    "chat_id": "IL_TUO_CHAT_ID"
+}
+```
+
+---
+
+## 🚀 Avvio
+
+### Metodo 1 — Docker (raccomandato, per AWS/VPS o uso locale)
+
+```bash
+# Prima build (solo la prima volta o dopo modifiche al Dockerfile)
+docker compose build
+
+# Avvio in background
+docker compose up -d
+
+# Controlla i log in tempo reale
+docker logs freqtrade_ai -f
+
+# Stop
+docker compose down
+```
+
+### Metodo 2 — AWS EC2 (persistente)
+
+```bash
+# Sul server, clona la repo
+git clone <il_tuo_repo>
+cd freqtrade
+
+# Crea e compila il .env
+cp .env .env  # poi modifica con nano/vim
+
+# Avvia con Docker (sempre attivo, si riavvia automaticamente)
+docker compose up -d
+```
+
+Il container è configurato con `restart: unless-stopped` — si riavvia automaticamente dopo riavvii del server.
+
+### Aggiornare la strategia senza rebuild
+
+Dato che `user_data/` è montato come volume, modifiche ai file Python nella strategia vengono recepite con un semplice restart:
+
+```bash
+docker compose restart
+```
+
+---
+
+## 📊 Dashboard — FreqUI
+
+Apri il browser su: **http://localhost:8080** (o `http://IP_DEL_SERVER:8080` su AWS)
+
+| Campo | Valore |
+|---|---|
+| Username | `admin` (o il valore in `.env`) |
+| Password | `freqtrade2024!` (o il valore in `.env`) |
+
+### Sezioni disponibili
+
+- **Dashboard** — panoramica: saldo, trade aperti, P&L, grafici
+- **Trade** — lista trade aperti e chiusi con dettagli
+- **Chart** — candlestick con overlay degli indicatori (RSI, EMA, MACD)
+- **Logs** — log in tempo reale del bot (utile per debug)
+
+---
+
+## 📈 Logica della Strategia
+
+### Ciclo di esecuzione (ogni 60 secondi)
+
+```
+bot_loop_start()
+ ├── Fetch news CryptoCompare  (cache 10min — 1 chiamata per tutti i pair)
+ └── LLM Sentiment Analysis    (cache 10min — 1 chiamata per tutti i pair)
+      └── OpenRouter Llama 3  →  se fallisce  →  Gemini Flash
+
+populate_entry_trend()  [per ogni coppia]
+ ├── Sentiment = BUY  AND  confidence ≥ 68%
+ ├── RSI ≥ 55                  (momentum obbligatorio)
+ ├── EMA10 > EMA30             (trend rialzista)
+ ├── MACD histogram > 0        (momentum in crescita)
+ └── Volume > media 20 candele
+
+populate_exit_trend()  [per ogni coppia]
+ ├── Sentiment = SELL  AND  confidence ≥ 68%
+ ├── RSI ≥ 78                  (overbought classico)
+ └── EMA10 < EMA30  (crossunder — inversione trend)
+```
+
+### Risk Management
+
+| Parametro | Valore |
+|---|---|
+| Stoploss fisso | -6% |
+| Trailing stop | Attivo dopo +2%, parte da +3.5% |
+| Max trade aperti | 4 |
+| ROI target | +8% immediato / +4% dopo 30min / +2.5% dopo 1h / +1% dopo 3h |
+| Pair scanning | Top 30 USDT per volume su Kraken (aggiornato ogni 30min) |
+
+---
+
+## 📱 Comandi Telegram
+
+| Comando | Descrizione |
+|---|---|
+| `/start` | Avvia il trading |
+| `/stop` | Ferma il trading (non chiude trade aperti) |
+| `/status` | Mostra tutti i trade aperti |
+| `/profit` | P&L cumulativo |
+| `/balance` | Saldo per valuta |
+| `/forceexit <id>\|all` | Chiude forzatamente uno o tutti i trade |
+| `/performance` | Performance per coppia |
+| `/daily` | P&L degli ultimi giorni |
+
+---
+
+## 🔒 Sicurezza
+
+> ⚠️ **Non committare mai il file `.env`** — è già in `.gitignore`.
+>
+> Su AWS, limita l'accesso alla porta 8080 via Security Group solo al tuo IP.
+
+---
+
+## 📁 File principali
+
+| File | Scopo |
+|---|---|
+| `.env` | API keys (NON committare) |
+| `docker-compose.yml` | Configurazione Docker |
+| `docker/Dockerfile.custom` | Immagine custom con python-dotenv |
+| `user_data/config.json` | Config exchange, dashboard, Telegram |
+| `user_data/strategies/AIsentimentStrategy.py` | Strategia principale |
+| `user_data/strategies/helpers/news_client.py` | Client CryptoCompare |
+| `user_data/strategies/helpers/llm_client.py` | Client OpenRouter + Gemini |
+
+---
+
+## 🌐 Passare al Live Trading
+
+1. Nel `.env` inserisci le chiavi Kraken reali
+2. In `user_data/config.json` imposta `"dry_run": false`
+3. Riavvia: `docker compose restart`
+
+> ⚠️ **Testa sempre in dry_run prima di mettere soldi reali.**
+
+---
+
+---
+
 # ![freqtrade](https://raw.githubusercontent.com/freqtrade/freqtrade/develop/docs/assets/freqtrade_poweredby.svg)
 
 [![Freqtrade CI](https://github.com/freqtrade/freqtrade/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/freqtrade/freqtrade/actions/workflows/ci.yml)
